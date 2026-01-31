@@ -1,0 +1,28 @@
+{
+  "name": "canvas-quiz-bot",
+  "version": "1.0.0",
+  "description": "Advanced AI-powered Canvas quiz automation with Groq API",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node test.js"
+  },
+  "keywords": ["canvas", "quiz", "automation", "groq", "ai"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "puppeteer": "^21.6.1",
+    "groq-sdk": "^0.3.2",
+    "dotenv": "^16.3.1",
+    "ws": "^8.15.1",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "rate-limiter-flexible": "^5.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
