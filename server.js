@@ -8,6 +8,7 @@ import { RateLimiterMemory } from 'rate-limiter-flexible';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
 
 dotenv.config();
 
@@ -71,7 +72,14 @@ class CanvasQuizBot {
     }
 
     async initialize() {
-        this.log('🚀 Initializing browser...');
+        this.log('ðŸš€ Initializing browser...');
+        
+        // Create screenshots directory in /tmp
+        const screenshotsDir = '/tmp/canvas-bot-screenshots';
+        if (!fs.existsSync(screenshotsDir)) {
+            fs.mkdirSync(screenshotsDir, { recursive: true });
+            this.log('ðŸ“ Created screenshots directory');
+        }
         
         this.browser = await puppeteer.launch({
             headless: this.config.headless !== false,
@@ -92,35 +100,43 @@ class CanvasQuizBot {
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         );
 
-        this.log('✅ Browser initialized');
+        this.log('âœ… Browser initialized');
     }
 
     async login(username, password) {
-        this.log('🔐 Logging into Canvas...');
+        this.log('ðŸ” Logging into Canvas...');
 
         try {
-            // Determine login URL
+            // Determine login URL and navigation strategy
             let loginUrl;
             let baseUrl;
+            let navigateToLoginFirst = false;
             
             if (this.config.loginUrl) {
-                // User provided custom login URL
+                // User provided custom login URL - go there first!
                 loginUrl = this.config.loginUrl;
                 const url = new URL(loginUrl);
                 baseUrl = `${url.protocol}//${url.hostname}`;
-                this.log(`📍 Using custom login URL: ${loginUrl}`);
+                navigateToLoginFirst = true; // Custom login URL means different domain, go there first
+                this.log(`ðŸ“ Using custom login URL: ${loginUrl}`);
+                this.log(`ðŸ“ Quiz URL: ${this.config.canvasUrl}`);
+                this.log(`ðŸ“ Strategy: Login at custom URL first, then navigate to quiz`);
             } else {
                 // Auto-detect login URL from quiz URL
                 const url = new URL(this.config.canvasUrl);
                 baseUrl = `${url.protocol}//${url.hostname}`;
                 loginUrl = baseUrl + '/login/canvas';
-                this.log(`📍 Auto-detected base URL: ${baseUrl}`);
-                this.log(`📍 Auto-detected login URL: ${loginUrl}`);
+                this.log(`ðŸ“ Auto-detected base URL: ${baseUrl}`);
+                this.log(`ðŸ“ Auto-detected login URL: ${loginUrl}`);
+                this.log(`ðŸ“ Quiz URL: ${this.config.canvasUrl}`);
+                this.log(`ðŸ“ Strategy: Navigate to quiz URL (may redirect to login)`);
             }
-            
-            this.log(`📍 Quiz URL: ${this.config.canvasUrl}`);
 
-            await this.page.goto(this.config.canvasUrl, {
+            // Navigate to the appropriate URL
+            const initialUrl = navigateToLoginFirst ? loginUrl : this.config.canvasUrl;
+            this.log(`ðŸ“ Navigating to: ${initialUrl}`);
+            
+            await this.page.goto(initialUrl, {
                 waitUntil: 'networkidle2',
                 timeout: 60000
             });
@@ -129,17 +145,17 @@ class CanvasQuizBot {
 
             // Log current URL after navigation
             const currentUrl = this.page.url();
-            this.log(`📍 Current URL after navigation: ${currentUrl}`);
+            this.log(`ðŸ“ Current URL after navigation: ${currentUrl}`);
 
             // Check if already logged in
             if (currentUrl.includes('/courses/') && currentUrl.includes('/quizzes/')) {
-                this.log('✅ Already logged in (on quiz page)!');
+                this.log('âœ… Already logged in (on quiz page)!');
                 return true;
             }
 
             // Check if on dashboard (also means logged in)
             if (currentUrl.includes('/dashboard') || currentUrl.includes('?login_success=1')) {
-                this.log('✅ Already logged in (on dashboard)!');
+                this.log('âœ… Already logged in (on dashboard)!');
                 // Navigate to quiz URL if we're on dashboard
                 if (this.config.canvasUrl !== currentUrl) {
                     await this.page.goto(this.config.canvasUrl, {
@@ -151,8 +167,9 @@ class CanvasQuizBot {
             }
 
             // DEBUG: Take a screenshot and log page structure
-            await this.page.screenshot({ path: '/tmp/login-page.png' });
-            this.log('📸 Screenshot saved to /tmp/login-page.png');
+            const screenshotPath = `/tmp/canvas-bot-screenshots/login-page-${Date.now()}.png`;
+            await this.page.screenshot({ path: screenshotPath });
+            this.log(`ðŸ“¸ Screenshot saved to ${screenshotPath}`);
 
             // DEBUG: Log all forms on the page
             const forms = await this.page.evaluate(() => {
@@ -169,7 +186,7 @@ class CanvasQuizBot {
                     }))
                 }));
             });
-            this.log(`📋 Found ${forms.length} forms on page`);
+            this.log(`ðŸ“‹ Found ${forms.length} forms on page`);
             forms.forEach((form, idx) => {
                 this.log(`Form ${idx + 1}: id="${form.id}", name="${form.name}", action="${form.action}"`);
                 form.inputs.forEach(input => {
@@ -178,25 +195,34 @@ class CanvasQuizBot {
             });
 
             // Wait for login form to appear
-            this.log('⏳ Waiting for login form...');
+            this.log('â³ Waiting for login form...');
             
-            // Canvas standard login form selectors based on official source code
-            // The form typically has id="login_form" and inputs have specific names
+            // Try GENERIC selectors first, then fallback to Canvas-specific ones
             const emailSelectors = [
-                // Standard Canvas login - most common
-                'input[name="pseudonym_session[unique_id]"]',
-                '#pseudonym_session_unique_id',
-                // Alternative selectors
+                // MOST GENERIC FIRST - any visible text/email input
+                'input[type="text"]',
                 'input[type="email"]',
-                'input[type="text"][name*="username" i]',
-                'input[type="text"][name*="email" i]',
-                'input[placeholder*="Email" i]',
-                'input[placeholder*="Username" i]',
+                'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="password"])',
+                
+                // Then try placeholder-based
+                'input[placeholder*="user" i]',
+                'input[placeholder*="email" i]',
+                'input[placeholder*="name" i]',
+                
+                // Then try name-based
+                'input[name*="user" i]',
+                'input[name*="username" i]',
+                'input[name*="email" i]',
+                
+                // Then form-based
+                'form input[type="text"]:first-of-type',
+                'form input[type="email"]:first-of-type',
                 '#login_form input[type="text"]',
                 '#login_form input[type="email"]',
-                // Generic fallbacks
-                'form input[type="email"]:first-of-type',
-                'form input[type="text"]:first-of-type'
+                
+                // Canvas-specific LAST
+                'input[name="pseudonym_session[unique_id]"]',
+                '#pseudonym_session_unique_id'
             ];
 
             let emailInput = null;
@@ -204,43 +230,58 @@ class CanvasQuizBot {
             
             for (const selector of emailSelectors) {
                 try {
-                    this.log(`🔍 Trying selector: ${selector}`);
+                    this.log(`ðŸ” Trying selector: ${selector}`);
                     emailInput = await this.page.waitForSelector(selector, { timeout: 3000 });
                     if (emailInput) {
-                        // Verify the element is visible
-                        const isVisible = await this.page.evaluate((sel) => {
+                        // Get element details for logging
+                        const elementInfo = await this.page.evaluate((sel) => {
                             const elem = document.querySelector(sel);
-                            if (!elem) return false;
+                            if (!elem) return null;
                             const style = window.getComputedStyle(elem);
-                            return style.display !== 'none' && 
-                                   style.visibility !== 'hidden' && 
-                                   style.opacity !== '0';
+                            return {
+                                tagName: elem.tagName,
+                                type: elem.type,
+                                name: elem.name,
+                                id: elem.id,
+                                placeholder: elem.placeholder,
+                                className: elem.className,
+                                isVisible: style.display !== 'none' && 
+                                          style.visibility !== 'hidden' && 
+                                          style.opacity !== '0'
+                            };
                         }, selector);
                         
-                        if (isVisible) {
+                        if (elementInfo) {
+                            this.log(`   Found: <${elementInfo.tagName} type="${elementInfo.type}" id="${elementInfo.id}" placeholder="${elementInfo.placeholder}">`);
+                            this.log(`   Visible: ${elementInfo.isVisible}`);
+                        }
+                        
+                        if (elementInfo && elementInfo.isVisible) {
                             usedSelector = selector;
-                            this.log(`✅ Found email field with selector: ${selector}`);
+                            this.log(`âœ… Using this field for username!`);
                             break;
                         } else {
-                            this.log(`⚠️  Element found but not visible: ${selector}`);
+                            this.log(`âš ï¸  Element found but not visible, trying next selector...`);
                             emailInput = null;
                         }
                     }
                 } catch (e) {
-                    this.log(`❌ Selector failed: ${selector} - ${e.message}`);
+                    this.log(`âŒ Selector "${selector}" not found on page`);
                     continue;
                 }
             }
 
             if (!emailInput) {
                 // Take another screenshot for debugging
-                await this.page.screenshot({ path: '/tmp/login-error.png' });
+                const errorScreenshotPath = `/tmp/canvas-bot-screenshots/login-error-${Date.now()}.png`;
+                await this.page.screenshot({ path: errorScreenshotPath });
                 
                 // Get page HTML for debugging
                 const html = await this.page.content();
-                this.log(`📄 Page HTML saved for debugging`);
+                this.log(`ðŸ“„ Page HTML length: ${html.length} characters`);
+                this.log(`ðŸ“¸ Error screenshot saved to ${errorScreenshotPath}`);
                 
-                throw new Error('Could not find email/username field. Check screenshots in /tmp/ for debugging.');
+                throw new Error('Could not find email/username field. Check screenshots in outputs/screenshots/ for debugging.');
             }
 
             // Clear the field first
@@ -249,18 +290,28 @@ class CanvasQuizBot {
             
             // Enter credentials with realistic typing
             await emailInput.type(username, { delay: 100 });
-            this.log(`✓ Entered username using selector: ${usedSelector}`);
+            this.log(`âœ“ Entered username using selector: ${usedSelector}`);
 
             // Find password field - Canvas standard selectors
             const passwordSelectors = [
-                // Standard Canvas login - most common
-                'input[name="pseudonym_session[password]"]',
-                '#pseudonym_session_password',
-                // Alternative selectors
+                // MOST GENERIC FIRST - any password input
                 'input[type="password"]',
+                
+                // Then placeholder-based
+                'input[placeholder*="password" i]',
+                'input[placeholder*="pass" i]',
+                
+                // Then name-based
+                'input[name*="password" i]',
+                'input[name*="pass" i]',
+                
+                // Then form-based
+                'form input[type="password"]',
                 '#login_form input[type="password"]',
-                // Generic fallback
-                'form input[type="password"]'
+                
+                // Canvas-specific LAST
+                'input[name="pseudonym_session[password]"]',
+                '#pseudonym_session_password'
             ];
 
             let passwordInput = null;
@@ -268,7 +319,7 @@ class CanvasQuizBot {
             
             for (const selector of passwordSelectors) {
                 try {
-                    this.log(`🔍 Trying password selector: ${selector}`);
+                    this.log(`ðŸ” Trying password selector: ${selector}`);
                     passwordInput = await this.page.waitForSelector(selector, { timeout: 3000 });
                     if (passwordInput) {
                         const isVisible = await this.page.evaluate((sel) => {
@@ -282,14 +333,14 @@ class CanvasQuizBot {
                         
                         if (isVisible) {
                             passwordSelector = selector;
-                            this.log(`✅ Found password field with selector: ${selector}`);
+                            this.log(`âœ… Found password field with selector: ${selector}`);
                             break;
                         } else {
                             passwordInput = null;
                         }
                     }
                 } catch (e) {
-                    this.log(`❌ Password selector failed: ${selector} - ${e.message}`);
+                    this.log(`âŒ Password selector failed: ${selector} - ${e.message}`);
                     continue;
                 }
             }
@@ -301,57 +352,69 @@ class CanvasQuizBot {
             await passwordInput.click({ clickCount: 3 });
             await this.page.keyboard.press('Backspace');
             await passwordInput.type(password, { delay: 100 });
-            this.log(`✓ Entered password using selector: ${passwordSelector}`);
+            this.log(`âœ“ Entered password using selector: ${passwordSelector}`);
 
             // Submit form - Canvas standard submit button
             const submitSelectors = [
-                // Canvas standard login button
+                // Generic selectors FIRST
+                'button[type="submit"]',
+                'input[type="submit"]',
+                'button:has-text("Go")',
+                'button:has-text("Log In")',
+                'button:has-text("Login")',
+                'button:has-text("Sign In")',
+                'button:has-text("Submit")',
+                // Canvas-specific
                 'button.Button.Button--login',
                 'button[type="submit"].Button--login',
                 '#login_form button[type="submit"]',
                 'button.login_button',
-                // Generic selectors
-                'button[type="submit"]',
-                'input[type="submit"]',
-                '.btn-primary[type="submit"]',
-                'button:has-text("Log In")',
-                'button:has-text("Login")'
+                '.btn-primary[type="submit"]'
             ];
 
             let submitted = false;
             for (const selector of submitSelectors) {
                 try {
-                    this.log(`🔍 Trying submit button selector: ${selector}`);
+                    this.log(`ðŸ” Trying submit button selector: ${selector}`);
                     const button = await this.page.$(selector);
                     if (button) {
-                        const isVisible = await this.page.evaluate((sel) => {
+                        const buttonInfo = await this.page.evaluate((sel) => {
                             const elem = document.querySelector(sel);
-                            if (!elem) return false;
+                            if (!elem) return null;
                             const style = window.getComputedStyle(elem);
-                            return style.display !== 'none' && 
-                                   style.visibility !== 'hidden' && 
-                                   style.opacity !== '0';
+                            return {
+                                text: elem.textContent?.trim() || elem.value,
+                                type: elem.type,
+                                tagName: elem.tagName,
+                                isVisible: style.display !== 'none' && 
+                                          style.visibility !== 'hidden' && 
+                                          style.opacity !== '0'
+                            };
                         }, selector);
                         
-                        if (isVisible) {
-                            this.log(`✅ Found submit button: ${selector}`);
+                        if (buttonInfo) {
+                            this.log(`   Found: <${buttonInfo.tagName}> with text "${buttonInfo.text}" (visible: ${buttonInfo.isVisible})`);
+                        }
+                        
+                        if (buttonInfo && buttonInfo.isVisible) {
+                            this.log(`âœ… Clicking button: "${buttonInfo.text}"`);
                             await button.click();
                             submitted = true;
                             break;
                         }
                     }
                 } catch (e) {
-                    this.log(`❌ Submit selector failed: ${selector}`);
+                    this.log(`âŒ Submit selector "${selector}" not found`);
                     continue;
                 }
             }
 
             if (!submitted) {
-                this.log('⚠️  No submit button found, pressing Enter as fallback');
+                this.log('âš ï¸  No submit button found, pressing Enter as fallback');
                 await passwordInput.press('Enter');
             }
 
-            this.log('⏳ Waiting for login to complete...');
+            this.log('â³ Waiting for login to complete...');
             
             try {
                 await this.page.waitForNavigation({ 
@@ -359,42 +422,153 @@ class CanvasQuizBot {
                     timeout: 30000 
                 });
             } catch (e) {
-                this.log('⚠️  Navigation timeout, checking if login succeeded anyway');
+                this.log('âš ï¸  Navigation timeout, checking if login succeeded anyway');
             }
 
             // Verify login success
             await this.page.waitForTimeout(2000);
             const finalUrl = this.page.url();
-            this.log(`📍 Final URL after login: ${finalUrl}`);
+            this.log(`ðŸ“ Final URL after login: ${finalUrl}`);
             
             // Take screenshot after login attempt
-            await this.page.screenshot({ path: '/tmp/after-login.png' });
+            const afterLoginPath = `/tmp/canvas-bot-screenshots/after-login-${Date.now()}.png`;
+            await this.page.screenshot({ path: afterLoginPath });
+            this.log(`ðŸ“¸ After-login screenshot: ${afterLoginPath}`);
             
-            if (finalUrl.includes('login') && !finalUrl.includes('login_success')) {
+            // Check if we're on a password page (multi-step login)
+            if (finalUrl.includes('password') || finalUrl.includes('login')) {
+                this.log('ðŸ” Detected multi-step login, looking for password field...');
+                
+                const passwordSelectors = [
+                    // MOST GENERIC FIRST
+                    'input[type="password"]',
+                    'input[placeholder*="password" i]',
+                    'input[name*="password" i]',
+                    'form input[type="password"]'
+                ];
+                
+                let passwordInput = null;
+                for (const selector of passwordSelectors) {
+                    try {
+                        passwordInput = await this.page.waitForSelector(selector, { timeout: 3000 });
+                        if (passwordInput) {
+                            this.log(`âœ… Found password field: ${selector}`);
+                            
+                            // Clear and enter password
+                            await passwordInput.click({ clickCount: 3 });
+                            await this.page.keyboard.press('Backspace');
+                            await passwordInput.type(password, { delay: 100 });
+                            this.log('âœ“ Entered password');
+                            
+                            // Find and click submit button
+                            const submitSelectors = [
+                                'button[type="submit"]',
+                                'input[type="submit"]',
+                                'button:has-text("Go")',
+                                'button:has-text("Login")',
+                                'button:has-text("Sign In")',
+                                'button:has-text("Submit")'
+                            ];
+                            
+                            let submitted = false;
+                            for (const selector of submitSelectors) {
+                                try {
+                                    const button = await this.page.$(selector);
+                                    if (button) {
+                                        await button.click();
+                                        submitted = true;
+                                        this.log('âœ“ Clicked submit button on password page');
+                                        break;
+                                    }
+                                } catch (e) {
+                                    continue;
+                                }
+                            }
+                            
+                            if (!submitted) {
+                                await passwordInput.press('Enter');
+                                this.log('âœ“ Pressed Enter on password field');
+                            }
+                            
+                            // Wait for navigation after password
+                            await this.page.waitForNavigation({ 
+                                waitUntil: 'networkidle2',
+                                timeout: 30000 
+                            }).catch(() => {
+                                this.log('âš ï¸ Navigation timeout after password, checking if login succeeded');
+                            });
+                            
+                            break;
+                        }
+                    } catch (e) {
+                        continue;
+                    }
+                }
+            }
+            
+            // Final check
+            await this.page.waitForTimeout(2000);
+            const veryFinalUrl = this.page.url();
+            this.log(`ðŸ“ Very final URL: ${veryFinalUrl}`);
+            
+            if (veryFinalUrl.includes('login') && !veryFinalUrl.includes('login_success')) {
+                const finalErrorPath = `/tmp/canvas-bot-screenshots/login-final-error-${Date.now()}.png`;
+                await this.page.screenshot({ path: finalErrorPath });
+                this.log(`ðŸ“¸ Final error screenshot: ${finalErrorPath}`);
                 throw new Error('Login failed - still on login page');
             }
-
-            this.log('✅ Successfully logged in!');
+            
+            this.log('âœ… Successfully logged in!');
+            
+            // If we used a custom login URL, now navigate to the quiz URL
+            if (navigateToLoginFirst && this.config.canvasUrl !== veryFinalUrl) {
+                this.log(`ðŸŽ¯ Now navigating to quiz URL: ${this.config.canvasUrl}`);
+                try {
+                    await this.page.goto(this.config.canvasUrl, {
+                        waitUntil: 'networkidle2',
+                        timeout: 60000
+                    });
+                    await this.page.waitForTimeout(2000);
+                    const quizUrl = this.page.url();
+                    this.log(`ðŸ“ Arrived at quiz page: ${quizUrl}`);
+                } catch (e) {
+                    this.log(`âš ï¸ Could not navigate to quiz URL: ${e.message}`, 'warning');
+                    throw new Error(`Failed to navigate to quiz after login: ${e.message}`);
+                }
+            }
+            
             return true;
 
         } catch (error) {
-            this.log(`❌ Login failed: ${error.message}`, 'error');
+            this.log(`âŒ Login failed: ${error.message}`, 'error');
             // Take error screenshot
             try {
-                await this.page.screenshot({ path: '/tmp/login-final-error.png' });
+                const errorPath = `/tmp/canvas-bot-screenshots/login-exception-${Date.now()}.png`;
+                await this.page.screenshot({ path: errorPath });
+                this.log(`ðŸ“¸ Exception screenshot: ${errorPath}`);
             } catch (e) {}
             throw error;
         }
     }
 
     async navigateToQuiz() {
-        this.log('📝 Navigating to quiz...');
+        this.log('ðŸ“ Navigating to quiz...');
 
         try {
-            await this.page.goto(this.config.canvasUrl, {
-                waitUntil: 'networkidle2',
-                timeout: 60000
-            });
+            const currentUrl = this.page.url();
+            
+            // Check if we're already on the quiz page
+            if (currentUrl.includes('/quizzes/')) {
+                this.log('âœ… Already on quiz page!');
+            } else {
+                this.log(`ðŸ“ Current URL: ${currentUrl}`);
+                this.log(`ðŸ“ Going to: ${this.config.canvasUrl}`);
+                
+                await this.page.goto(this.config.canvasUrl, {
+                    waitUntil: 'networkidle2',
+                    timeout: 60000
+                });
+            }
 
             await this.page.waitForTimeout(2000);
 
@@ -428,19 +602,19 @@ class CanvasQuizBot {
                     waitUntil: 'networkidle2',
                     timeout: 30000
                 });
-                this.log('✅ Quiz started successfully');
+                this.log('âœ… Quiz started successfully');
             } else {
-                this.log('⚠️  Could not find quiz start button, assuming already in quiz');
+                this.log('âš ï¸  Could not find quiz start button, assuming already in quiz');
             }
 
         } catch (error) {
-            this.log(`❌ Navigation error: ${error.message}`, 'error');
+            this.log(`âŒ Navigation error: ${error.message}`, 'error');
             throw error;
         }
     }
 
     async extractQuestions() {
-        this.log('📊 Extracting questions from quiz...');
+        this.log('ðŸ“Š Extracting questions from quiz...');
 
         try {
             await this.page.waitForTimeout(2000);
@@ -485,7 +659,7 @@ class CanvasQuizBot {
             });
 
             this.questions = questions;
-            this.log(`✅ Extracted ${questions.length} questions`);
+            this.log(`âœ… Extracted ${questions.length} questions`);
             
             questions.forEach((q, i) => {
                 this.log(`Q${i + 1}: ${q.type} - ${q.text.substring(0, 60)}...`);
@@ -494,13 +668,13 @@ class CanvasQuizBot {
             return questions;
 
         } catch (error) {
-            this.log(`❌ Error extracting questions: ${error.message}`, 'error');
+            this.log(`âŒ Error extracting questions: ${error.message}`, 'error');
             throw error;
         }
     }
 
     async analyzeQuestionWithAI(question) {
-        this.log(`🤖 Analyzing question with AI: ${question.text.substring(0, 50)}...`);
+        this.log(`ðŸ¤– Analyzing question with AI: ${question.text.substring(0, 50)}...`);
 
         try {
             let prompt = `You are taking a quiz. Answer the following question:\n\n${question.text}\n\n`;
@@ -537,18 +711,18 @@ class CanvasQuizBot {
             });
 
             const answer = completion.choices[0]?.message?.content?.trim() || '';
-            this.log(`✅ AI Answer: ${answer}`);
+            this.log(`âœ… AI Answer: ${answer}`);
 
             return answer;
 
         } catch (error) {
-            this.log(`❌ AI Error: ${error.message}`, 'error');
+            this.log(`âŒ AI Error: ${error.message}`, 'error');
             throw error;
         }
     }
 
     async answerQuestion(question, aiAnswer) {
-        this.log(`📝 Answering question: ${question.text.substring(0, 50)}...`);
+        this.log(`ðŸ“ Answering question: ${question.text.substring(0, 50)}...`);
 
         try {
             // Scroll to question
@@ -584,7 +758,7 @@ class CanvasQuizBot {
                         }
                     }, option.id || option.value);
 
-                    this.log(`✅ Selected option ${answerLetter}: ${option.text}`);
+                    this.log(`âœ… Selected option ${answerLetter}: ${option.text}`);
                 } else {
                     throw new Error(`Invalid answer index: ${answerIndex}`);
                 }
@@ -607,7 +781,7 @@ class CanvasQuizBot {
                             }
                         }, option.id || option.value);
 
-                        this.log(`✅ Selected option ${letter}: ${option.text}`);
+                        this.log(`âœ… Selected option ${letter}: ${option.text}`);
                     }
                 }
 
@@ -623,7 +797,7 @@ class CanvasQuizBot {
                     }
                 }, aiAnswer);
 
-                this.log(`✅ Entered answer: ${aiAnswer.substring(0, 50)}...`);
+                this.log(`âœ… Entered answer: ${aiAnswer.substring(0, 50)}...`);
             }
 
             this.answers.push({
@@ -634,13 +808,13 @@ class CanvasQuizBot {
             });
 
         } catch (error) {
-            this.log(`❌ Error answering question: ${error.message}`, 'error');
+            this.log(`âŒ Error answering question: ${error.message}`, 'error');
             throw error;
         }
     }
 
     async submitQuiz() {
-        this.log('📤 Submitting quiz...');
+        this.log('ðŸ“¤ Submitting quiz...');
 
         try {
             // Look for submit button
@@ -658,7 +832,7 @@ class CanvasQuizBot {
                     if (button) {
                         await button.click();
                         submitted = true;
-                        this.log('✅ Clicked submit button');
+                        this.log('âœ… Clicked submit button');
                         break;
                     }
                 } catch (e) {
@@ -667,7 +841,7 @@ class CanvasQuizBot {
             }
 
             if (!submitted && this.config.autoSubmit) {
-                this.log('⚠️  Could not find submit button');
+                this.log('âš ï¸  Could not find submit button');
             }
 
             await this.page.waitForTimeout(3000);
@@ -680,14 +854,14 @@ class CanvasQuizBot {
                 );
                 if (confirmButton) {
                     await confirmButton.click();
-                    this.log('✅ Confirmed submission');
+                    this.log('âœ… Confirmed submission');
                 }
             } catch (e) {
                 // No confirmation needed
             }
 
         } catch (error) {
-            this.log(`⚠️  Submit error: ${error.message}`, 'warning');
+            this.log(`âš ï¸  Submit error: ${error.message}`, 'warning');
         }
     }
 
@@ -702,7 +876,7 @@ class CanvasQuizBot {
             await this.navigateToQuiz();
             const questions = await this.extractQuestions();
 
-            this.log(`📊 Processing ${questions.length} questions...`);
+            this.log(`ðŸ“Š Processing ${questions.length} questions...`);
 
             for (let i = 0; i < questions.length; i++) {
                 const question = questions[i];
@@ -722,7 +896,29 @@ class CanvasQuizBot {
                 await this.submitQuiz();
             }
 
-            this.log('🎉 Quiz completed successfully!');
+            this.log('ðŸŽ‰ Quiz completed successfully!');
+            
+            // Copy screenshots to outputs directory
+            try {
+                const screenshotsDir = '/tmp/canvas-bot-screenshots';
+                const outputDir = '/mnt/user-data/outputs/screenshots';
+                
+                if (fs.existsSync(screenshotsDir)) {
+                    if (!fs.existsSync(outputDir)) {
+                        fs.mkdirSync(outputDir, { recursive: true });
+                    }
+                    
+                    const files = fs.readdirSync(screenshotsDir);
+                    for (const file of files) {
+                        const src = path.join(screenshotsDir, file);
+                        const dest = path.join(outputDir, file);
+                        fs.copyFileSync(src, dest);
+                    }
+                    this.log(`ðŸ“¸ Copied ${files.length} screenshots to outputs directory`);
+                }
+            } catch (e) {
+                this.log(`âš ï¸ Could not copy screenshots: ${e.message}`, 'warning');
+            }
             
             return {
                 success: true,
@@ -731,12 +927,35 @@ class CanvasQuizBot {
             };
 
         } catch (error) {
-            this.log(`❌ Fatal error: ${error.message}`, 'error');
+            this.log(`âŒ Fatal error: ${error.message}`, 'error');
+            
+            // Copy screenshots even on error
+            try {
+                const screenshotsDir = '/tmp/canvas-bot-screenshots';
+                const outputDir = '/mnt/user-data/outputs/screenshots';
+                
+                if (fs.existsSync(screenshotsDir)) {
+                    if (!fs.existsSync(outputDir)) {
+                        fs.mkdirSync(outputDir, { recursive: true });
+                    }
+                    
+                    const files = fs.readdirSync(screenshotsDir);
+                    for (const file of files) {
+                        const src = path.join(screenshotsDir, file);
+                        const dest = path.join(outputDir, file);
+                        fs.copyFileSync(src, dest);
+                    }
+                    this.log(`ðŸ“¸ Copied ${files.length} screenshots to outputs directory`);
+                }
+            } catch (e) {
+                this.log(`âš ï¸ Could not copy screenshots: ${e.message}`, 'warning');
+            }
+            
             throw error;
         } finally {
             if (this.browser) {
                 await this.browser.close();
-                this.log('🔒 Browser closed');
+                this.log('ðŸ”’ Browser closed');
             }
         }
     }
@@ -817,8 +1036,8 @@ app.get('/', (req, res) => {
 
 // HTTP server
 const server = app.listen(PORT, () => {
-    console.log(`🚀 Canvas Quiz Bot Server running on http://localhost:${PORT}`);
-    console.log(`📡 WebSocket server ready`);
+    console.log(`ðŸš€ Canvas Quiz Bot Server running on http://localhost:${PORT}`);
+    console.log(`ðŸ“¡ WebSocket server ready`);
 });
 
 // WebSocket upgrade
@@ -829,7 +1048,7 @@ server.on('upgrade', (request, socket, head) => {
 });
 
 wss.on('connection', (ws) => {
-    console.log('🔌 Client connected');
+    console.log('ðŸ”Œ Client connected');
     
     ws.send(JSON.stringify({
         type: 'info',
@@ -837,7 +1056,7 @@ wss.on('connection', (ws) => {
     }));
 
     ws.on('close', () => {
-        console.log('🔌 Client disconnected');
+        console.log('ðŸ”Œ Client disconnected');
     });
 });
 
